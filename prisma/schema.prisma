@@ -1,0 +1,324 @@
+// Monalertics — Prisma Schema
+// Database: PostgreSQL
+// Architecture: Modular Monolith
+// Modules: auth, monitor, alert, screenshot, billing, scheduler
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// AUTH MODULE
+// ============================================================
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String
+  name          String?
+  role          UserRole  @default(USER)
+  emailVerified DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  memberships WorkspaceMember[]
+  ownedAlerts Alert[] // alerts yang dikirim ke user ini (opsional audit)
+
+  @@map("users")
+}
+
+model WorkspaceMember {
+  id          String     @id @default(uuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  role        MemberRole @default(OWNER)
+  createdAt   DateTime   @default(now())
+
+  @@unique([userId, workspaceId])
+  @@map("workspace_members")
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+// ============================================================
+// BILLING MODULE
+// ============================================================
+
+model Plan {
+  id                 String   @id @default(cuid())
+  name               String   @unique // FREE, BASIC, PRO, ENTERPRISE
+  displayName        String
+  maxMonitors        Int
+  minIntervalSeconds Int
+  retentionDays      Int
+  supportsTelegram   Boolean  @default(false)
+  supportsDiscord    Boolean  @default(false)
+  maxScreenshots     Int      @default(5) // per bulan
+  supportsStatusPage Boolean  @default(false)
+  priceMonthly       Int      @default(0) // dalam Rupiah
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+
+  workspaces    Workspace[]
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id          String             @id @default(uuid())
+  workspaceId String             @unique
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  planId      String
+  plan        Plan               @relation(fields: [planId], references: [id])
+  status      SubscriptionStatus @default(ACTIVE)
+  startedAt   DateTime           @default(now())
+  expiresAt   DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@map("subscriptions")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  EXPIRED
+}
+
+// ============================================================
+// CORE: WORKSPACE (TENANT)
+// ============================================================
+
+model Workspace {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members      WorkspaceMember[]
+  subscription Subscription?
+  monitors     Monitor[]
+  channels     NotificationChannel[]
+  plan         Plan?                 @relation(fields: [planId], references: [id])
+  planId       String?
+
+  @@map("workspaces")
+}
+
+// ============================================================
+// MONITOR MODULE
+// ============================================================
+
+model Monitor {
+  id              String        @id @default(uuid())
+  workspaceId     String
+  workspace       Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name            String
+  type            MonitorType
+  target          String // URL / hostname / domain
+  intervalSeconds Int           @default(300)
+  isActive        Boolean       @default(true)
+  settings        Json          @default("{}") // threshold, expectedStatus, timeout, dll
+  lastCheckedAt   DateTime?
+  lastStatus      MonitorStatus @default(UNKNOWN)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  checks              MonitorCheck[]
+  incidents           Incident[]
+  notificationConfigs NotificationConfig[]
+  screenshots         Screenshot[]
+
+  @@index([workspaceId])
+  @@index([isActive, lastCheckedAt])
+  @@map("monitors")
+}
+
+enum MonitorType {
+  UPTIME
+  SSL
+  DOMAIN
+}
+
+enum MonitorStatus {
+  UP
+  DOWN
+  WARNING
+  UNKNOWN
+}
+
+model MonitorCheck {
+  id             String        @id @default(uuid())
+  monitorId      String
+  monitor        Monitor       @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  status         MonitorStatus
+  responseTimeMs Int?
+  statusCode     Int?
+  errorMessage   String?
+  screenshotId   String?
+  screenshot     Screenshot?   @relation(fields: [screenshotId], references: [id], onDelete: SetNull)
+  checkedAt      DateTime      @default(now())
+
+  @@index([monitorId, checkedAt])
+  @@map("monitor_checks")
+}
+
+model Incident {
+  id              String    @id @default(uuid())
+  monitorId       String
+  monitor         Monitor   @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  startedAt       DateTime  @default(now())
+  resolvedAt      DateTime?
+  durationSeconds Int?
+  cause           String?
+  severity        Severity  @default(CRITICAL)
+  createdAt       DateTime  @default(now())
+
+  alerts Alert[]
+
+  @@index([monitorId, startedAt])
+  @@map("incidents")
+}
+
+enum Severity {
+  CRITICAL
+  WARNING
+  INFO
+}
+
+// ============================================================
+// ALERT MODULE
+// ============================================================
+
+model NotificationConfig {
+  id          String                  @id @default(uuid())
+  monitorId   String
+  monitor     Monitor                 @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  channelType NotificationChannelType
+  target      String // email address / chat_id / webhook URL
+  isActive    Boolean                 @default(true)
+  createdAt   DateTime                @default(now())
+
+  @@index([monitorId])
+  @@map("notification_configs")
+}
+
+model NotificationChannel {
+  id          String                  @id @default(uuid())
+  workspaceId String
+  workspace   Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  type        NotificationChannelType
+  name        String
+  config      Json                    @default("{}") // token, chat_id, webhook url, dsb
+  isActive    Boolean                 @default(true)
+  isVerified  Boolean                 @default(false)
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  @@index([workspaceId])
+  @@map("notification_channels")
+}
+
+enum NotificationChannelType {
+  EMAIL
+  TELEGRAM
+  DISCORD
+}
+
+model Alert {
+  id          String                  @id @default(uuid())
+  incidentId  String?
+  incident    Incident?               @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  userId      String?
+  user        User?                   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  channelType NotificationChannelType
+  recipient   String
+  status      AlertStatus             @default(PENDING)
+  sentAt      DateTime?
+  content     String?
+  error       String?
+  createdAt   DateTime                @default(now())
+
+  @@index([incidentId])
+  @@index([status])
+  @@map("alerts")
+}
+
+enum AlertStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+// ============================================================
+// SCREENSHOT MODULE
+// ============================================================
+
+model Screenshot {
+  id         String   @id @default(uuid())
+  monitorId  String
+  monitor    Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  url        String
+  imagePath  String // path lokal / object storage URL
+  capturedAt DateTime @default(now())
+
+  checks MonitorCheck[]
+
+  @@index([monitorId, capturedAt])
+  @@map("screenshots")
+}
+
+// ============================================================
+// SCHEDULER MODULE (database-backed job queue)
+// ============================================================
+
+model Job {
+  id          String    @id @default(uuid())
+  type        JobType
+  payload     Json      @default("{}")
+  status      JobStatus @default(PENDING)
+  scheduledAt DateTime
+  startedAt   DateTime?
+  completedAt DateTime?
+  error       String?
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  createdAt   DateTime  @default(now())
+
+  @@index([status, scheduledAt])
+  @@map("jobs")
+}
+
+enum JobType {
+  UPTIME_CHECK
+  SSL_CHECK
+  DOMAIN_CHECK
+  SCREENSHOT
+  ALERT
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}

@@ -1,0 +1,59 @@
+LAPORAN PERBAIKAN OPENCODE CLI
+Tanggal : 2026-09-29
+Mesin   : Windows 11 Pro, Node v22 (Laragon)
+
+========================================
+1. MASALAH
+========================================
+OpenCode CLI tidak bisa dibuka.
+
+========================================
+2. PENYEBAB
+========================================
+- Pada 2026-09-29 07:40 UTC opencode menjalankan auto-update:
+    npm install --global --force @opencode/cli@2.0.19
+- Proses terputus sebelum script postinstall selesai mengunduh binary asli.
+  Di log tidak ada entri "cli starting" setelah itu.
+- Akibatnya file
+    C:\laragon\bin\nodejs\node-v22\node_modules\@opencode\cli\bin\opencode.exe
+  hanya placeholder 229 byte. Windows menolak menjalankannya
+  ("not a valid application for this OS platform").
+
+========================================
+3. DIAGNOSIS YANG DILAKUKAN (hanya baca)
+========================================
+- Get-Command opencode -All  -> shim ada di C:\laragon\bin\nodejs\node-v22
+- npm ls -g --depth=0        -> terpasang @opencode/cli@2.0.19 dan opencode-ai@1.18.33
+- Isi opencode.cmd           -> saat itu mengarah ke opencode-ai (v1.18.33)
+- Ukuran opencode.exe di @opencode/cli = 229 byte (rusak)
+- Menjalankan exe tersebut langsung -> gagal (bukan aplikasi valid)
+
+========================================
+4. PERBAIKAN YANG DILAKUKAN
+========================================
+1) npm uninstall -g @opencode/cli
+     -> removed 13 packages
+2) npm install -g @opencode/cli@2.0.19
+     -> added 3 packages (sekitar 59 detik)
+     -> opencode.exe sekarang 206.463.368 byte (binary asli)
+
+========================================
+5. VERIFIKASI
+========================================
+- opencode.exe --version (langsung) -> "opencode v2.0.19", exit code 0
+- opencode.cmd sekarang mengarah ke:
+    %dp0%\node_modules\@opencode\cli\bin\opencode.exe
+- Shim opencode2.cmd sudah ada kembali
+- opencode --version -> "opencode v2.0.19"
+
+========================================
+6. CATATAN
+========================================
+- Paket lama opencode-ai@1.18.33 tidak diubah. Jika tidak dipakai,
+  bisa dihapus dengan: npm uninstall -g opencode-ai
+- Error "Unsupported model mimo-auto" (400) di sesi absen-ilogo adalah
+  masalah terpisah (model default di config), bukan penyebab CLI gagal
+  dibuka.
+- Error ENOTFOUND models.opencode.ai dan TimeoutError di log menunjukkan
+  koneksi internet sempat bermasalah; kemungkinan ikut memutus update.
+- Tidak ada file di folder proyek ini yang diubah selain laporan ini.
